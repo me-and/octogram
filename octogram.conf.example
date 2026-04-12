@@ -1,0 +1,19 @@
+[octopus]
+# Your Octopus Energy API key — found at https://octopus.energy/dashboard/new/accounts/personal-details/api-access
+api_key = sk_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+# Your Octopus account number — shown on bills and the dashboard (e.g. A-1234ABCD)
+account_number = A-XXXXXXXX
+
+[telegram]
+# Bot token from @BotFather on Telegram (see README for setup guide)
+bot_token = 123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
+
+# Your Telegram chat ID (see README for how to find this)
+chat_id = 123456789
+
+[settings]
+# Report slots at or below this price in pence/kWh (inc. VAT).
+# Set to 0 to report only zero and negative slots (default).
+# Set higher (e.g. 5) to also catch very cheap slots.
+price_threshold_p = 0
