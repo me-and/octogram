@@ -117,6 +117,42 @@ python3 octogram.py --dry-run
 python3 octogram.py --config /etc/octogram/octogram.conf
 ```
 
+## Nixpkgs / NixOS users
+
+With Nixpkgs, `nix-build` and the like in the current directory should build the `octogram` executable.
+
+With NixOS + Nix Flakes, consider adding something like the below to your `flake.nix`:
+
+```nix
+{
+  inputs = {
+    nixpkgs = { };
+    flake-utils = { };
+    octogram = {
+      url = "github:me-and/octogram";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
+  };
+
+  outputs =
+    { nixpkgs, octogram, ... }:
+    {
+      nixosConfigurations.box = nixpkgs.lib.nixosSystem {
+        modules = [
+          octogram.nixosModules.default
+          {
+            services.octogram = {
+              enable = true;
+              configFile = "/path/to/octogram.conf";
+            };
+          }
+        ];
+      };
+    };
+}
+```
+
 ## Troubleshooting
 
 | Problem | Fix |
