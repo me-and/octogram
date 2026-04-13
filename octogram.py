@@ -20,7 +20,7 @@ import argparse
 import configparser
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -265,6 +265,23 @@ def main() -> int:
         return 1
 
     log.info("Fetched %d rate slot(s)", len(rates))
+
+    # Reject if next-day prices haven't been published yet.
+    # Octopus Agile publishes next-day rates each afternoon; the first slot for
+    # tomorrow starts at local midnight, so we check that at least one rate
+    # falls on or after that boundary.
+    tomorrow_local = (datetime.now().date() + timedelta(days=1))
+    tomorrow_midnight_local = datetime(
+        tomorrow_local.year, tomorrow_local.month, tomorrow_local.day,
+        tzinfo=datetime.now(timezone.utc).astimezone().tzinfo,
+    )
+    if not any(_parse_dt(r.get("valid_from", "")) >= tomorrow_midnight_local for r in rates):
+        log.error(
+            "Next day's prices are not yet available. "
+            "Octopus Agile rates for %s have not been published yet.",
+            tomorrow_local.strftime("%-d %b %Y"),
+        )
+        return 1
 
     qualifying = [r for r in rates if r.get("value_inc_vat", 999) <= threshold]
     log.info("%d slot(s) at or below %.2fp/kWh", len(qualifying), threshold)
