@@ -31,10 +31,34 @@ in
       description = "Report upcoming cheap Octopus Agile prices";
       wants = [ "network-online.service" ];
       after = [ "network-online.service" ];
-      script = ''
-        ${octogram}/bin/octogram --config ${lib.escapeShellArg cfg.configFile}
-      '';
-      serviceConfig.Type = "oneshot";
+      script = ''${octogram}/bin/octogram --config "$CREDENTIALS_DIRECTORY"/octogram.conf'';
+      serviceConfig = {
+        Type = "oneshot";
+        DynamicUser = true;
+        CapabilityBoundingSet = "";
+        NoNewPrivileges = true;
+        PrivateDevices = true;
+        PrivateTmp = true;
+        ProtectControlGroups = true;
+        ProtectHome = true;
+        ProtectKernelLogs = true;
+        ProtectKernelModules = true;
+        ProtectKernelTunables = true;
+        ProtectSystem = "strict";
+        # AF_UNIX is required for DNS resolution via systemd-resolved
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+        ];
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [ "@system-service" ];
+        LoadCredential = "octogram.conf:${cfg.configFile}";
+      };
     };
     systemd.timers.octogram = {
       description = "Daily report of upcoming cheap Octopus Agile prices";
