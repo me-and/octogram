@@ -9,10 +9,10 @@
       nixpkgs,
       flake-utils,
       self,
-    }@inputs:
+    }:
     {
       nixosModules = {
-        octogram = import ./module.nix { inherit inputs; };
+        octogram = import ./module.nix;
         default = self.nixosModules.octogram;
       };
 
@@ -33,10 +33,7 @@
       in
       {
         packages = {
-          octogram = import ./. {
-            pkgs = pkgs;
-            lib = nixpkgs.lib;
-          };
+          octogram = import ./. { inherit pkgs; };
           default = self.packages."${system}".octogram;
         };
         formatter = pkgs.nixfmt-tree;

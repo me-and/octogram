@@ -1,4 +1,3 @@
-{ inputs }:
 {
   lib,
   config,
@@ -8,7 +7,7 @@
 let
   cfg = config.services.octogram;
 
-  octogram = import ./. { inherit pkgs lib; };
+  octogram = import ./. { inherit pkgs; };
 in
 {
   options.services.octogram = {
