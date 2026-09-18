@@ -131,9 +131,7 @@ def get_active_tariff_code(api_key: str, account_number: str) -> str:
     )
 
 
-def _parse_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
+def _parse_dt(value: str) -> datetime:
     # Octopus returns ISO 8601 strings; handle both Z and +00:00
     value = value.replace("Z", "+00:00")
     return datetime.fromisoformat(value)
@@ -199,21 +197,31 @@ def send_telegram(bot_token: str, chat_id: str, text: str) -> None:
 # Message formatting
 # ---------------------------------------------------------------------------
 
-def format_slot_time(valid_from: str, valid_to: str) -> str:
-    dt_from = _parse_dt(valid_from).astimezone()
-    dt_to = _parse_dt(valid_to).astimezone()
-    day = dt_from.strftime("%a %-d %b")
-    t_from = dt_from.strftime("%H:%M")
-    t_to = dt_to.strftime("%H:%M")
-    return f"{day} {t_from}–{t_to}"
-
 
 def build_message(slots: list[dict]) -> str:
     lines = ["⚡ <b>Octopus Agile: Free/Negative slots found!</b>", ""]
+    consecutive_times: list[tuple[datetime, datetime]] = []
+    consecutive_from: datetime | None = None
+    consecutive_to: datetime | None = None
     for slot in slots:
         price = slot["value_inc_vat"]
-        time_str = format_slot_time(slot["valid_from"], slot["valid_to"])
-        lines.append(f"• {time_str}  {price:.2f}p/kWh")
+        dt_from = _parse_dt(slot["valid_from"]).astimezone()
+        dt_to = _parse_dt(slot["valid_to"]).astimezone()
+        if consecutive_to == dt_from:
+            consecutive_to = dt_to
+        else:
+            if consecutive_from is not None:
+                assert consecutive_to is not None
+                consecutive_times.append((consecutive_from, consecutive_to))
+            consecutive_from = dt_from
+            consecutive_to = dt_to
+        lines.append(f"• {dt_from:%a %-d %b %H:%M}-{dt_to:%H:%M} {price:.2f}p/kWh")
+    assert consecutive_from is not None
+    assert consecutive_to is not None
+    consecutive_times.append((consecutive_from, consecutive_to))
+    lines.extend(("", "⏰ <b>Consecutive slots:</b>", ""))
+    for dt_from, dt_to in consecutive_times:
+        lines.append(f"• {dt_from:%H:%M}-{dt_to:%H:%M}")
     lines.append("")
     total_minutes = len(slots) * 30
     lines.append(f"{len(slots)} slot(s) | {total_minutes} minutes total")
