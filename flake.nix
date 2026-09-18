@@ -1,13 +1,11 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
     {
       nixpkgs,
-      flake-utils,
       self,
     }:
     {
@@ -25,18 +23,12 @@
         };
         default = self.overlays.octogram;
       };
-    }
-    // flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs { inherit system; };
-      in
-      {
-        packages = {
-          octogram = import ./. { inherit pkgs; };
-          default = self.packages."${system}".octogram;
-        };
-        formatter = pkgs.nixfmt-tree;
-      }
-    );
+
+      packages = builtins.mapAttrs (system: pkgs: {
+        octogram = import ./. { inherit pkgs; };
+        default = self.packages."${system}".octogram;
+      }) nixpkgs.legacyPackages;
+
+      formatter = builtins.mapAttrs (system: pkgs: pkgs.nixfmt-tree) nixpkgs.legacyPackages;
+    };
 }
