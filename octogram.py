@@ -47,6 +47,7 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 # Config loading
 # ---------------------------------------------------------------------------
 
+
 def find_config(explicit: str | None) -> Path:
     import os
 
@@ -56,9 +57,15 @@ def find_config(explicit: str | None) -> Path:
             raise FileNotFoundError(f"Config file not found: {explicit}")
         return p
 
-    xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", "") or (Path.home() / ".config"))
+    xdg_config_home = Path(
+        os.environ.get("XDG_CONFIG_HOME", "") or (Path.home() / ".config")
+    )
     xdg_config_dirs_raw = os.environ.get("XDG_CONFIG_DIRS", "")
-    xdg_config_dirs = [Path(d) for d in xdg_config_dirs_raw.split(":") if d] if xdg_config_dirs_raw else []
+    xdg_config_dirs = (
+        [Path(d) for d in xdg_config_dirs_raw.split(":") if d]
+        if xdg_config_dirs_raw
+        else []
+    )
 
     def _candidates_for(base: Path):
         yield base / "octogram.conf"
@@ -93,9 +100,11 @@ def load_config(path: Path) -> configparser.ConfigParser:
             raise ValueError(f"Missing required config: [{section}] {key}")
     return cfg
 
+
 # ---------------------------------------------------------------------------
 # Octopus API helpers
 # ---------------------------------------------------------------------------
+
 
 def octopus_get(path: str, api_key: str, params: dict | None = None) -> dict:
     url = f"{OCTOPUS_API_BASE}{path}"
@@ -118,12 +127,11 @@ def get_active_tariff_code(api_key: str, account_number: str) -> str:
                 valid_from = _parse_dt(agreement.get("valid_from"))
                 valid_to = _parse_dt(agreement.get("valid_to"))
                 # Active if: valid_from <= now AND (valid_to is None OR valid_to > now)
-                if valid_from and valid_from <= now:
-                    if valid_to is None or valid_to > now:
-                        tariff_code = agreement.get("tariff_code", "")
-                        if tariff_code:
-                            log.info("Active tariff code: %s", tariff_code)
-                            return tariff_code
+                if valid_from <= now and valid_to > now:
+                    tariff_code = agreement.get("tariff_code", "")
+                    if tariff_code:
+                        log.info("Active tariff code: %s", tariff_code)
+                        return tariff_code
 
     raise RuntimeError(
         "Could not find an active electricity tariff in your Octopus account. "
@@ -172,7 +180,8 @@ def fetch_unit_rates(
         if not next_url:
             break
         # Extract page param from next URL for subsequent calls
-        from urllib.parse import urlparse, parse_qs
+        from urllib.parse import parse_qs, urlparse
+
         qs = parse_qs(urlparse(next_url).query)
         params = {**params, "page": qs["page"][0]}
 
@@ -180,9 +189,11 @@ def fetch_unit_rates(
     results.sort(key=lambda r: r.get("valid_from", ""))
     return results
 
+
 # ---------------------------------------------------------------------------
 # Telegram helpers
 # ---------------------------------------------------------------------------
+
 
 def send_telegram(bot_token: str, chat_id: str, text: str) -> None:
     url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
@@ -192,6 +203,7 @@ def send_telegram(bot_token: str, chat_id: str, text: str) -> None:
         timeout=15,
     )
     resp.raise_for_status()
+
 
 # ---------------------------------------------------------------------------
 # Message formatting
@@ -227,13 +239,21 @@ def build_message(slots: list[dict]) -> str:
     lines.append(f"{len(slots)} slot(s) | {total_minutes} minutes total")
     return "\n".join(lines)
 
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dry-run", action="store_true", help="Print message to stdout instead of sending to Telegram")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print message to stdout instead of sending to Telegram",
+    )
     parser.add_argument("--config", metavar="PATH", help="Path to config file")
     args = parser.parse_args()
 
@@ -258,7 +278,9 @@ def main() -> int:
         return 1
 
     if "AGILE" not in tariff_code.upper():
-        log.warning("Active tariff '%s' does not appear to be an Agile tariff.", tariff_code)
+        log.warning(
+            "Active tariff '%s' does not appear to be an Agile tariff.", tariff_code
+        )
 
     product_code = tariff_code_to_product_code(tariff_code)
     log.info("Product code: %s", product_code)
@@ -277,12 +299,16 @@ def main() -> int:
     # Octopus Agile publishes next-day rates each afternoon; the first slot for
     # tomorrow starts at local midnight, so we check that at least one rate
     # falls on or after that boundary.
-    tomorrow_local = (datetime.now().date() + timedelta(days=1))
+    tomorrow_local = datetime.now().date() + timedelta(days=1)
     tomorrow_midnight_local = datetime(
-        tomorrow_local.year, tomorrow_local.month, tomorrow_local.day,
+        tomorrow_local.year,
+        tomorrow_local.month,
+        tomorrow_local.day,
         tzinfo=datetime.now(timezone.utc).astimezone().tzinfo,
     )
-    if not any(_parse_dt(r.get("valid_from", "")) >= tomorrow_midnight_local for r in rates):
+    if not any(
+        _parse_dt(r.get("valid_from", "")) >= tomorrow_midnight_local for r in rates
+    ):
         log.error(
             "Next day's prices are not yet available. "
             "Octopus Agile rates for %s have not been published yet.",
