@@ -213,8 +213,7 @@ def build_message(slots: list[dict]) -> str:
     for slot in slots:
         price = slot["value_inc_vat"]
         time_str = format_slot_time(slot["valid_from"], slot["valid_to"])
-        sign = "−" if price < 0 else " "
-        lines.append(f"• {time_str}  {sign}{abs(price):.2f}p/kWh")
+        lines.append(f"• {time_str}  {price:.2f}p/kWh")
     lines.append("")
     total_minutes = len(slots) * 30
     lines.append(f"{len(slots)} slot(s) | {total_minutes} minutes total")
