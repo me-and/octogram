@@ -31,10 +31,11 @@ in
       description = "Report upcoming cheap Octopus Agile prices";
       wants = [ "network-online.service" ];
       after = [ "network-online.service" ];
-      script = ''${octogram}/bin/octogram --config "$CREDENTIALS_DIRECTORY"/octogram.conf'';
+      script = ''${octogram}/bin/octogram --config "$CREDENTIALS_DIRECTORY"/octogram.conf --cache-file "$STATE_DIRECTORY"/last_reported.json'';
       serviceConfig = {
         Type = "oneshot";
         DynamicUser = true;
+        StateDirectory = "octogram";
         CapabilityBoundingSet = "";
         NoNewPrivileges = true;
         PrivateDevices = true;

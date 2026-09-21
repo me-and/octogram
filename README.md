@@ -7,7 +7,10 @@ Checks upcoming [Octopus Agile](https://octopus.energy/agile/) electricity price
 1. Fetches your active tariff code from the Octopus Energy API using your account number.
 2. Retrieves upcoming half-hour unit rates for the next 24 hours.
 3. Filters slots at or below a configurable price threshold (default: 0p/kWh).
-4. If qualifying slots exist, sends a Telegram message. If none exist, exits silently.
+4. Compares against a cache of the latest slot reported on a previous run, so only slots that are new since then are considered.
+5. If new qualifying slots exist, sends a Telegram message and updates the cache. If none exist, exits silently.
+
+Pass `--discard-cache` to ignore the cache for one run and report every currently qualifying upcoming slot (the cache is still updated afterwards, so subsequent runs go back to reporting only new slots).
 
 Example notification:
 
@@ -115,6 +118,12 @@ python3 octogram.py --dry-run
 
 # Use a specific config file
 python3 octogram.py --config /etc/octogram/octogram.conf
+
+# Discard the cache and report every currently qualifying upcoming slot
+python3 octogram.py --discard-cache
+
+# Use a specific cache file (default: $XDG_STATE_HOME/octogram/last_reported.json)
+python3 octogram.py --cache-file /var/lib/octogram/last_reported.json
 ```
 
 ## Nixpkgs / NixOS users

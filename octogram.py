@@ -18,7 +18,9 @@ Config is read from (first match wins):
 
 import argparse
 import configparser
+import json
 import logging
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,8 +51,6 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 
 
 def find_config(explicit: str | None) -> Path:
-    import os
-
     if explicit is not None:
         p = Path(explicit)
         if not p.is_file():
@@ -99,6 +99,49 @@ def load_config(path: Path) -> configparser.ConfigParser:
         if not cfg.has_option(section, key) or not cfg.get(section, key).strip():
             raise ValueError(f"Missing required config: [{section}] {key}")
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Cache handling
+# ---------------------------------------------------------------------------
+
+
+def default_cache_file() -> Path:
+    xdg_state_home = Path(
+        os.environ.get("XDG_STATE_HOME", "") or (Path.home() / ".local" / "state")
+    )
+    return xdg_state_home / "octogram" / "last_reported.json"
+
+
+def load_last_reported(path: Path) -> datetime | None:
+    """
+    Return the valid_to timestamp of the latest slot reported on a previous
+    run, or None if there's no usable cache (e.g. first run).
+    """
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not read cache file %s: %s", path, exc)
+        return None
+
+    last_reported = data.get("last_reported")
+    if not last_reported:
+        return None
+    try:
+        return _parse_dt(last_reported)
+    except ValueError as exc:
+        log.warning("Could not parse cache file %s: %s", path, exc)
+        return None
+
+
+def save_last_reported(path: Path, last_reported: datetime) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump({"last_reported": last_reported.isoformat()}, f)
+        f.write("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +298,22 @@ def main() -> int:
         help="Print message to stdout instead of sending to Telegram",
     )
     parser.add_argument("--config", metavar="PATH", help="Path to config file")
+    parser.add_argument(
+        "--cache-file",
+        metavar="PATH",
+        help=(
+            "Path to the cache file recording the latest reported slot "
+            "(default: $XDG_STATE_HOME/octogram/last_reported.json)"
+        ),
+    )
+    parser.add_argument(
+        "--discard-cache",
+        action="store_true",
+        help=(
+            "Ignore the cache and report all qualifying upcoming slots, "
+            "not just those new since the last report"
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -319,11 +378,21 @@ def main() -> int:
     qualifying = [r for r in rates if r.get("value_inc_vat", 999) <= threshold]
     log.info("%d slot(s) at or below %.2fp/kWh", len(qualifying), threshold)
 
+    cache_path = Path(args.cache_file) if args.cache_file else default_cache_file()
+    last_reported = None if args.discard_cache else load_last_reported(cache_path)
+    if last_reported is not None:
+        log.info("Last reported slot ended: %s", last_reported.isoformat())
+        qualifying = [
+            r for r in qualifying if _parse_dt(r["valid_from"]) >= last_reported
+        ]
+        log.info("%d slot(s) new since last report", len(qualifying))
+
     if not qualifying:
-        log.info("No qualifying slots — suppressing notification.")
+        log.info("No new qualifying slots — suppressing notification.")
         return 0
 
     message = build_message(qualifying)
+    newest_valid_to = max(_parse_dt(r["valid_to"]) for r in qualifying)
 
     if args.dry_run:
         print(message)
@@ -335,6 +404,11 @@ def main() -> int:
     except Exception as exc:
         log.error("Failed to send Telegram message: %s", exc)
         return 1
+
+    try:
+        save_last_reported(cache_path, newest_valid_to)
+    except OSError as exc:
+        log.warning("Could not write cache file %s: %s", cache_path, exc)
 
     return 0
 
