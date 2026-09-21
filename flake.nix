@@ -16,10 +16,7 @@
 
       overlays = {
         octogram = final: prev: {
-          octogram = import ./. {
-            pkgs = final;
-            lib = nixpkgs.lib;
-          };
+          octogram = import ./. { pkgs = final; };
         };
         default = self.overlays.octogram;
       };
