@@ -22,7 +22,18 @@ in
     };
     onCalendar = lib.mkOption {
       description = "Systemd timer OnCalendar value to run Octogram.";
-      default = "17:00 UTC";
+      default = "hourly";
+      type = lib.types.singleLineStr;
+    };
+    randomizedOffset = lib.mkOption {
+      description = "Systemd timer RandomizedOffsetSec value to run Octogram.";
+      default = "1h";
+      type = lib.types.nullOr lib.types.singleLineStr;
+    };
+    accuracy = lib.mkOption {
+      description = "Systemd timer AccuracySec value to run Octogram.";
+      default = "15min";
+      type = lib.types.nullOr lib.types.singleLineStr;
     };
   };
 
@@ -67,8 +78,12 @@ in
       timerConfig = {
         OnCalendar = cfg.onCalendar;
         Persistent = true;
-        AccuracySec = "1h";
-        RandomizedDelaySec = "1h";
+      }
+      // lib.optionalAttrs (cfg.accuracy != null) {
+        AccuracySec = cfg.accuracy;
+      }
+      // lib.optionalAttrs (cfg.randomizedOffset != null) {
+        RandomizedOffsetSec = cfg.randomizedOffset;
       };
     };
   };
