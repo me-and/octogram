@@ -492,12 +492,12 @@ def check_agile_prices(
     if not any(
         _parse_dt(r.get("valid_from", "")) >= tomorrow_midnight_local for r in rates
     ):
-        log.error(
+        log.info(
             "Next day's prices are not yet available. "
             "Octopus Agile rates for %s have not been published yet.",
             tomorrow_local.strftime("%-d %b %Y"),
         )
-        return 1
+        return 0
 
     qualifying = [r for r in rates if r.get("value_inc_vat", 999) <= threshold]
     log.info("%d slot(s) at or below %.2fp/kWh", len(qualifying), threshold)
