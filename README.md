@@ -1,16 +1,16 @@
 # Octogram
 
-Checks upcoming [Octopus Agile](https://octopus.energy/agile/) electricity prices and sends you a [Telegram](https://telegram.org/) message whenever there are upcoming half-hour slots where the price is **zero or negative** (i.e. the grid is paying you to use electricity).
+Checks upcoming [Octopus Agile](https://octopus.energy/agile/) electricity prices and sends you a [Telegram](https://telegram.org/) message whenever there are upcoming half-hour slots where the price is **zero or negative** (i.e. the grid is paying you to use electricity). It also watches for Octopus **Saving Sessions** (the "Power Down"-style challenges, e.g. a reward for using less electricity between 6pm and 7pm), automatically joins any you're eligible for and haven't already joined, and notifies you via Telegram when it does.
 
 ## How it works
+
+### Agile price checking
 
 1. Fetches your active tariff code from the Octopus Energy API using your account number.
 2. Retrieves upcoming half-hour unit rates for the next 24 hours.
 3. Filters slots at or below a configurable price threshold (default: 0p/kWh).
 4. Compares against a cache of the latest slot reported on a previous run, so only slots that are new since then are considered.
 5. If new qualifying slots exist, sends a Telegram message and updates the cache. If none exist, exits silently.
-
-Pass `--discard-cache` to ignore the cache for one run and report every currently qualifying upcoming slot (the cache is still updated afterwards, so subsequent runs go back to reporting only new slots).
 
 Example notification:
 
@@ -23,6 +23,29 @@ Example notification:
 
 3 slot(s) | 90 minutes total
 ```
+
+### Saving Sessions ("Power Down" challenges)
+
+1. Exchanges your Octopus API key for a short-lived token, then queries Octopus's Saving Sessions GraphQL API for available events and your account's campaign/join status.
+2. Filters out events that are dev/test events, carry no reward, have already finished, aren't valid for your region, or that you've already joined (checked against both the Octopus API's own record and a local cache, so re-running the script doesn't attempt to re-join an event).
+3. Joins any remaining eligible events.
+4. Sends a Telegram message listing the event(s) just joined, and updates the cache so they aren't joined again.
+
+This is designed to be run on a frequent cadence (e.g. hourly) via cron/systemd timer, so new Saving Sessions get joined automatically and promptly.
+
+Example notification:
+
+```
+🔋 Octopus Saving Session: Joined!
+
+• Mon 21 Sep 18:00-19:00 — 75 OctoPoints/kWh
+
+Signed up for 1 session(s).
+```
+
+### Cache and `--discard-cache`
+
+Both checks share a single cache file recording the latest reported price slot and the IDs of Saving Session events already joined. Pass `--discard-cache` to ignore the cache for one run: every currently qualifying upcoming price slot is reported, and every currently-available Saving Session event is re-considered for joining (though events already joined per the Octopus API itself are still skipped, so this can't cause a duplicate join). The cache is rebuilt afterwards, so subsequent runs go back to normal behaviour.
 
 ## Prerequisites
 

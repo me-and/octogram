@@ -43,6 +43,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 OCTOPUS_API_BASE = "https://api.octopus.energy/v1"
+OCTOPUS_GRAPHQL_MAIN_URL = "https://api.octopus.energy/v1/graphql/"
+OCTOPUS_GRAPHQL_BACKEND_URL = "https://api.backend.octopus.energy/v1/graphql/"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
 # ---------------------------------------------------------------------------
@@ -113,35 +115,57 @@ def default_cache_file() -> Path:
     return xdg_state_home / "octogram" / "last_reported.json"
 
 
-def load_last_reported(path: Path) -> datetime | None:
+def load_cache(path: Path) -> dict:
     """
-    Return the valid_to timestamp of the latest slot reported on a previous
-    run, or None if there's no usable cache (e.g. first run).
+    Return the full cache document (as a dict), or an empty dict if there's
+    no usable cache (e.g. first run, missing file, or unreadable contents).
     """
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return None
+        return {}
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("Could not read cache file %s: %s", path, exc)
-        return None
+        return {}
 
-    last_reported = data.get("last_reported")
+    if not isinstance(data, dict):
+        log.warning("Cache file %s did not contain a JSON object; ignoring", path)
+        return {}
+    return data
+
+
+def save_cache(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f)
+        f.write("\n")
+
+
+def get_last_reported(cache: dict) -> datetime | None:
+    """
+    Return the valid_to timestamp of the latest slot reported on a previous
+    run, or None if there's no usable cache entry (e.g. first run).
+    """
+    last_reported = cache.get("last_reported")
     if not last_reported:
         return None
     try:
         return _parse_dt(last_reported)
     except ValueError as exc:
-        log.warning("Could not parse cache file %s: %s", path, exc)
+        log.warning("Could not parse cached last_reported value: %s", exc)
         return None
 
 
-def save_last_reported(path: Path, last_reported: datetime) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump({"last_reported": last_reported.isoformat()}, f)
-        f.write("\n")
+def get_joined_saving_session_ids(cache: dict) -> set[str]:
+    """
+    Return the set of saving session event IDs we've previously joined,
+    according to the local cache.
+    """
+    ids = cache.get("joined_saving_sessions", [])
+    if not isinstance(ids, list):
+        return set()
+    return {str(i) for i in ids}
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +258,120 @@ def fetch_unit_rates(
 
 
 # ---------------------------------------------------------------------------
+# Octopus Saving Sessions (GraphQL) helpers
+# ---------------------------------------------------------------------------
+
+
+def graphql_request(url: str, query: str, token: str | None = None) -> dict:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token is not None:
+        headers["Authorization"] = token
+    resp = requests.post(url, json={"query": query}, headers=headers, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    errors = data.get("errors")
+    if errors:
+        raise RuntimeError(f"GraphQL errors: {errors}")
+    return data["data"]
+
+
+def obtain_kraken_token(api_key: str) -> str:
+    """Exchange an Octopus API key for a short-lived Kraken JWT token."""
+    query = f"""mutation {{
+      obtainKrakenToken(input: {{ APIKey: "{api_key}" }}) {{
+        token
+      }}
+    }}"""
+    data = graphql_request(OCTOPUS_GRAPHQL_MAIN_URL, query)
+    token = data.get("obtainKrakenToken", {}).get("token")
+    if not token:
+        raise RuntimeError("No token returned from obtainKrakenToken")
+    return token
+
+
+def fetch_saving_sessions(token: str, account_number: str) -> dict:
+    """
+    Fetch Saving Sessions ("Power Down" challenge) data: all known events plus
+    this account's campaign membership and already-joined events.
+    """
+    query = f"""query {{
+      savingSessions {{
+        events(includeDev: false) {{
+          id
+          code
+          rewardPerKwhInOctoPoints
+          startAt
+          endAt
+          devEvent
+          targetRegion {{
+            regionId
+          }}
+        }}
+        account(accountNumber: "{account_number}") {{
+          signedUpMeterPoint {{
+            regionId
+          }}
+          hasJoinedCampaign
+          joinedEvents {{
+            eventId
+          }}
+        }}
+      }}
+    }}"""
+    data = graphql_request(OCTOPUS_GRAPHQL_BACKEND_URL, query, token=token)
+    return data["savingSessions"]
+
+
+def join_saving_session_event(token: str, account_number: str, event_code: str) -> list[str]:
+    """Join a Saving Session event; returns the list of event codes the account is now joined to."""
+    query = f"""mutation {{
+      joinSavingSessionsEvent(input: {{
+        accountNumber: "{account_number}"
+        eventCode: "{event_code}"
+      }}) {{
+        joinedEventCodes
+      }}
+    }}"""
+    data = graphql_request(OCTOPUS_GRAPHQL_BACKEND_URL, query, token=token)
+    return data["joinSavingSessionsEvent"]["joinedEventCodes"]
+
+
+def find_joinable_saving_session_events(
+    saving_sessions: dict,
+    already_joined_ids: set[str],
+) -> list[dict]:
+    """
+    Filter the events returned by fetch_saving_sessions() down to those that
+    are worth joining: not a dev/test event, carrying a positive reward, not
+    yet finished, eligible for our region, and not already joined (per either
+    the Octopus API's own record or our local cache).
+    """
+    account = saving_sessions.get("account", {})
+    api_joined_ids = {str(e["eventId"]) for e in account.get("joinedEvents", [])}
+    joined_ids = api_joined_ids | already_joined_ids
+
+    signed_up_region = (account.get("signedUpMeterPoint") or {}).get("regionId")
+    now = datetime.now(timezone.utc)
+
+    joinable = []
+    for event in saving_sessions.get("events", []):
+        if event.get("devEvent"):
+            continue
+        if event.get("rewardPerKwhInOctoPoints", 0) <= 0:
+            continue
+        if _parse_dt(event["endAt"]) <= now:
+            continue
+        if str(event["id"]) in joined_ids:
+            continue
+        target_regions = {r["regionId"] for r in event.get("targetRegion", [])}
+        if target_regions and signed_up_region not in target_regions:
+            continue
+        joinable.append(event)
+
+    return joinable
+
+
+# ---------------------------------------------------------------------------
 # Telegram helpers
 # ---------------------------------------------------------------------------
 
@@ -283,53 +421,39 @@ def build_message(slots: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def build_saving_session_message(events: list[dict]) -> str:
+    lines = ["🔋 <b>Octopus Saving Session: Joined!</b>", ""]
+    for event in events:
+        dt_from = _parse_dt(event["startAt"]).astimezone()
+        dt_to = _parse_dt(event["endAt"]).astimezone()
+        reward = event["rewardPerKwhInOctoPoints"]
+        lines.append(
+            f"• {dt_from:%a %-d %b %H:%M}-{dt_to:%H:%M} — {reward} OctoPoints/kWh"
+        )
+    lines.append("")
+    lines.append(f"Signed up for {len(events)} session(s).")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
-# Main
+# Agile price checking
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print message to stdout instead of sending to Telegram",
-    )
-    parser.add_argument("--config", metavar="PATH", help="Path to config file")
-    parser.add_argument(
-        "--cache-file",
-        metavar="PATH",
-        help=(
-            "Path to the cache file recording the latest reported slot "
-            "(default: $XDG_STATE_HOME/octogram/last_reported.json)"
-        ),
-    )
-    parser.add_argument(
-        "--discard-cache",
-        action="store_true",
-        help=(
-            "Ignore the cache and report all qualifying upcoming slots, "
-            "not just those new since the last report"
-        ),
-    )
-    args = parser.parse_args()
-
-    try:
-        config_path = find_config(args.config)
-        log.info("Using config: %s", config_path)
-        cfg = load_config(config_path)
-    except (FileNotFoundError, ValueError) as exc:
-        log.error("%s", exc)
-        return 1
-
-    api_key = cfg.get("octopus", "api_key")
-    account_number = cfg.get("octopus", "account_number")
-    bot_token = cfg.get("telegram", "bot_token")
-    chat_id = cfg.get("telegram", "chat_id")
-    threshold = cfg.getfloat("settings", "price_threshold_p", fallback=0.0)
-
+def check_agile_prices(
+    api_key: str,
+    account_number: str,
+    bot_token: str,
+    chat_id: str,
+    threshold: float,
+    cache: dict,
+    dry_run: bool,
+) -> int:
+    """
+    Check for upcoming free/negative Agile price slots and notify via
+    Telegram. Updates `cache["last_reported"]` in place on success. Returns 0
+    on success (including "nothing to report"), 1 on failure.
+    """
     try:
         tariff_code = get_active_tariff_code(api_key, account_number)
     except Exception as exc:
@@ -378,8 +502,7 @@ def main() -> int:
     qualifying = [r for r in rates if r.get("value_inc_vat", 999) <= threshold]
     log.info("%d slot(s) at or below %.2fp/kWh", len(qualifying), threshold)
 
-    cache_path = Path(args.cache_file) if args.cache_file else default_cache_file()
-    last_reported = None if args.discard_cache else load_last_reported(cache_path)
+    last_reported = get_last_reported(cache)
     if last_reported is not None:
         log.info("Last reported slot ended: %s", last_reported.isoformat())
         qualifying = [
@@ -394,7 +517,7 @@ def main() -> int:
     message = build_message(qualifying)
     newest_valid_to = max(_parse_dt(r["valid_to"]) for r in qualifying)
 
-    if args.dry_run:
+    if dry_run:
         print(message)
         return 0
 
@@ -405,12 +528,163 @@ def main() -> int:
         log.error("Failed to send Telegram message: %s", exc)
         return 1
 
-    try:
-        save_last_reported(cache_path, newest_valid_to)
-    except OSError as exc:
-        log.warning("Could not write cache file %s: %s", cache_path, exc)
-
+    cache["last_reported"] = newest_valid_to.isoformat()
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Saving Sessions ("Power Down" challenge) checking
+# ---------------------------------------------------------------------------
+
+
+def check_saving_sessions(
+    api_key: str,
+    account_number: str,
+    bot_token: str,
+    chat_id: str,
+    cache: dict,
+    dry_run: bool,
+) -> int:
+    """
+    Check for available Saving Session events (Octopus's "Power Down"-style
+    challenges), join any we're eligible for and haven't already joined, and
+    notify via Telegram. Updates `cache["joined_saving_sessions"]` in place
+    on success. Returns 0 on success (including "nothing to join"), 1 if
+    fetching failed or any join attempt failed.
+    """
+    try:
+        token = obtain_kraken_token(api_key)
+        saving_sessions = fetch_saving_sessions(token, account_number)
+    except Exception as exc:
+        log.error("Failed to fetch Saving Sessions from Octopus API: %s", exc)
+        return 1
+
+    if not saving_sessions.get("account", {}).get("hasJoinedCampaign"):
+        log.warning(
+            "Account has not opted into the Octopus Saving Sessions campaign; "
+            "skipping event join check."
+        )
+        return 0
+
+    already_joined_ids = get_joined_saving_session_ids(cache)
+    joinable = find_joinable_saving_session_events(saving_sessions, already_joined_ids)
+    log.info("%d Saving Session event(s) available to join", len(joinable))
+
+    if not joinable:
+        return 0
+
+    if dry_run:
+        print(build_saving_session_message(joinable))
+        return 0
+
+    joined_events = []
+    for event in joinable:
+        try:
+            joined_codes = join_saving_session_event(
+                token, account_number, event["code"]
+            )
+        except Exception as exc:
+            log.error("Failed to join Saving Session event %s: %s", event["code"], exc)
+            continue
+        if event["code"] not in joined_codes:
+            log.error(
+                "Join request for event %s did not confirm membership (got: %s)",
+                event["code"],
+                joined_codes,
+            )
+            continue
+        log.info(
+            "Joined Saving Session event %s (%s - %s)",
+            event["code"],
+            event["startAt"],
+            event["endAt"],
+        )
+        joined_events.append(event)
+        cache.setdefault("joined_saving_sessions", [])
+        if str(event["id"]) not in cache["joined_saving_sessions"]:
+            cache["joined_saving_sessions"].append(str(event["id"]))
+
+    if not joined_events:
+        return 1
+
+    message = build_saving_session_message(joined_events)
+    try:
+        send_telegram(bot_token, chat_id, message)
+        log.info("Telegram message sent successfully for joined Saving Session(s).")
+    except Exception as exc:
+        log.error("Failed to send Telegram message: %s", exc)
+        return 1
+
+    return 0 if len(joined_events) == len(joinable) else 1
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print message to stdout instead of sending to Telegram",
+    )
+    parser.add_argument("--config", metavar="PATH", help="Path to config file")
+    parser.add_argument(
+        "--cache-file",
+        metavar="PATH",
+        help=(
+            "Path to the cache file recording the latest reported slot "
+            "(default: $XDG_STATE_HOME/octogram/last_reported.json)"
+        ),
+    )
+    parser.add_argument(
+        "--discard-cache",
+        action="store_true",
+        help=(
+            "Ignore the cache: report all qualifying upcoming slots (not just "
+            "those new since the last report), and re-check joinability of "
+            "all Saving Session events (already-joined ones are still "
+            "skipped based on the Octopus API's own records)"
+        ),
+    )
+    args = parser.parse_args()
+
+    try:
+        config_path = find_config(args.config)
+        log.info("Using config: %s", config_path)
+        cfg = load_config(config_path)
+    except (FileNotFoundError, ValueError) as exc:
+        log.error("%s", exc)
+        return 1
+
+    api_key = cfg.get("octopus", "api_key")
+    account_number = cfg.get("octopus", "account_number")
+    bot_token = cfg.get("telegram", "bot_token")
+    chat_id = cfg.get("telegram", "chat_id")
+    threshold = cfg.getfloat("settings", "price_threshold_p", fallback=0.0)
+
+    cache_path = Path(args.cache_file) if args.cache_file else default_cache_file()
+    cache = {} if args.discard_cache else load_cache(cache_path)
+
+    exit_code = 0
+    exit_code |= check_agile_prices(
+        api_key, account_number, bot_token, chat_id, threshold, cache, args.dry_run
+    )
+    exit_code |= check_saving_sessions(
+        api_key, account_number, bot_token, chat_id, cache, args.dry_run
+    )
+
+    if not args.dry_run:
+        try:
+            save_cache(cache_path, cache)
+        except OSError as exc:
+            log.warning("Could not write cache file %s: %s", cache_path, exc)
+
+    return exit_code
 
 
 if __name__ == "__main__":
